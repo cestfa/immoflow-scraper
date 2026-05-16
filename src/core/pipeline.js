@@ -368,6 +368,31 @@ async function waitForNetworkSettling(page, timeoutMs = 3000) {
 // DB sync — pure REST, batch upsert, price_history, protected user fields
 // ---------------------------------------------------------------------------
 
+const DB_FETCH_CHUNK_SIZE  = Number.parseInt(process.env.DB_FETCH_CHUNK_SIZE || '120', 10);
+const DB_UPSERT_CHUNK_SIZE = Number.parseInt(process.env.DB_UPSERT_CHUNK_SIZE || '100', 10);
+const DB_REQUEST_RETRIES   = Number.parseInt(process.env.DB_REQUEST_RETRIES || '2', 10);
+
+function chunkArray(items, chunkSize) {
+  const size = Math.max(1, Number.isFinite(chunkSize) ? chunkSize : 1);
+  const out = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+async function withRetry(fn, retries, label) {
+  const maxRetries = Math.max(0, Number.isFinite(retries) ? retries : 0);
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= maxRetries) throw err;
+      console.warn(`[DB] ${label} failed (attempt ${attempt + 1}/${maxRetries + 1}): ${err.message}. Retrying...`);
+      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+    }
+  }
+}
+
 /**
  * Sync a batch of listings to Supabase.
  * 1. Fetch all existing rows for the given IDs in one GET request.
@@ -388,25 +413,39 @@ async function syncListings(db, listings, sourceLabel) {
 
   console.log(`\n[DB]${sourceLabel} Syncing ${listings.length} listings...`);
 
-  // 1. Fetch all existing rows in a single request using in-filter
-  const ids        = listings.map((l) => l.id);
-  const inFilter   = `in.(${ids.join(',')})`;
-  const params     = new URLSearchParams({
-    select: 'id,price,currency,status,personal_status,snooze_until,note,first_seen',
-    id:     inFilter,
-  });
-  const url        = `${process.env.SUPABASE_URL.replace(/\/$/, '')}/rest/v1/listings?${params}`;
-  const res        = await fetch(url, {
-    headers: {
-      apikey:        process.env.SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${process.env.SUPABASE_ANON_KEY}`,
-    },
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`[DB] Batch fetch failed (${res.status}): ${body}`);
+  // 1. Fetch existing rows in chunks to avoid oversized in-filter URLs.
+  const ids = listings.map((l) => l.id);
+  const idChunks = chunkArray(ids, DB_FETCH_CHUNK_SIZE);
+  const existingRows = [];
+
+  for (let i = 0; i < idChunks.length; i++) {
+    const idChunk   = idChunks[i];
+    const inFilter  = `in.(${idChunk.join(',')})`;
+    const params    = new URLSearchParams({
+      select: 'id,price,currency,status,personal_status,snooze_until,note,first_seen',
+      id:     inFilter,
+    });
+    const url       = `${process.env.SUPABASE_URL.replace(/\/$/, '')}/rest/v1/listings?${params}`;
+
+    const rows = await withRetry(async () => {
+      const res = await fetch(url, {
+        headers: {
+          apikey:        process.env.SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${process.env.SUPABASE_ANON_KEY}`,
+        },
+      });
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`[DB] Batch fetch failed (${res.status}): ${body}`);
+      }
+
+      return res.json();
+    }, DB_REQUEST_RETRIES, `${sourceLabel} existing-rows chunk ${i + 1}/${idChunks.length}`);
+
+    existingRows.push(...rows);
   }
-  const existingRows = await res.json();
+
   const existingMap  = new Map(existingRows.map((r) => [r.id, r]));
 
   // 2. Price-history inserts (collected, then batch-inserted)
@@ -430,8 +469,16 @@ async function syncListings(db, listings, sourceLabel) {
     return payload;
   });
 
-  // 4. Batch upsert listings
-  await db.upsert('listings', payloads);
+  // 4. Batch upsert listings in chunks for large runs.
+  const payloadChunks = chunkArray(payloads, DB_UPSERT_CHUNK_SIZE);
+  for (let i = 0; i < payloadChunks.length; i++) {
+    const chunk = payloadChunks[i];
+    await withRetry(
+      () => db.upsert('listings', chunk),
+      DB_REQUEST_RETRIES,
+      `${sourceLabel} upsert chunk ${i + 1}/${payloadChunks.length}`
+    );
+  }
 
   // 5. Batch insert price_history (best-effort)
   if (priceHistoryRows.length) {
