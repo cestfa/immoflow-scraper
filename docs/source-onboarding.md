@@ -18,7 +18,8 @@ Use this workflow when adding a new source from a prompt like: `Add this source 
 5. Add fixture HTML and expected JSON under `data/<source>/`.
 6. Do not edit the registry when adding a source; the loader discovers folders automatically.
 7. Keep the root entrypoint untouched; new sources should only extend the source folder set.
-8. Add a short note to `docs/ai-context.md` or a source-specific doc if the site has unusual rules.
+8. Add source-specific npm aliases in `package.json` when you want a quick repeatable run path, e.g. `scrape:<source>`, `capture:<source>`, `validate:<source>`.
+9. Add a short note to `docs/ai-context.md` or a source-specific doc if the site has unusual rules.
 
 ## Login rule
 

@@ -159,3 +159,5 @@ Add new variables to `.env.example` when adding a source.
  - `facebook-marketplace` — Facebook Marketplace (property rentals). Requires login. Env: `FACEBOOK_MARKETPLACE_URLS`.
    Reliably returns: `address_raw`, `image_urls`, `price`. Structured fields (rooms, surface, zip_code, city)
    may be present but are often unavailable in marketplace listings.
+- `petites-annonces` — Petitesannonces.ch location search results. No login required. Env: `PETITES_ANNONCES_URLS`.
+  Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `street`, `street_number`, `zip_code`, `city`, `property_type`, `image_urls`.
