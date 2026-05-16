@@ -90,6 +90,22 @@ Add (find your npm path with `which npm`):
 Check it's set: `crontab -l`
 View logs: `tail -f /root/immoflow-scraper/scrape.log`
 
+### 7. Discord alerts (optional)
+
+Add these to `.env` on the VPS:
+
+```bash
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+DISCORD_ALERT_ON_SUCCESS=false
+```
+
+Behavior:
+
+- The scraper always continues to run remaining sources even if one source fails.
+- If any source fails, the overall command exits with a non-zero code after the run ends.
+- A Discord alert is sent on failed runs (and on successful runs only if `DISCORD_ALERT_ON_SUCCESS=true`).
+- Alert message includes per-source status (`OK`, `FAILED`, `SKIPPED`) plus new/updated counts.
+
 ---
 
 ## Cross-platform behaviour
