@@ -171,3 +171,5 @@ Add new variables to `.env.example` when adding a source.
   Reliably returns: `address_raw`, `price`, `city`, `property_type`, `title`.
 - `derham` — Derham Lausanne rentals filtered by price and proximity. No login required. Env: `DERHAM_URLS`.
   Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `zip_code`, `city`, `property_type`.
+- `myhomies` — myHOMIES Lausanne colocation search results. No login required. Env: `MYHOMIES_URLS`.
+  Reliably returns: `address_raw`, `price`, `living_space_m2`, `zip_code`, `city`, `property_type`, `title`, `image_urls`, `available_from`.
