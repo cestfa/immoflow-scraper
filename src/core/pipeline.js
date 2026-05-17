@@ -8,6 +8,12 @@
  *
  * All Supabase calls go through the pure-REST client in supabase.js.
  * Data shaping goes through normalizeListing / mergeForUpsert in core.js.
+ *
+ * scrapeSource() now returns enriched stats used by the Discord alert:
+ *   {
+ *     newCount, updatedCount, skipped,
+ *     urlResults: [{ url, listingCount, scrollAttempts, scrollFallback, warnings }]
+ *   }
  */
 
 'use strict';
@@ -26,6 +32,9 @@ const {
 } = require('./config');
 
 const { normalizeListing, mergeForUpsert } = require('./core');
+
+// Low-listing warning threshold — override via env SCRAPE_LOW_LISTING_THRESHOLD
+const LOW_LISTING_THRESHOLD = Number.parseInt(process.env.SCRAPE_LOW_LISTING_THRESHOLD || '5', 10);
 
 // ---------------------------------------------------------------------------
 // Platform helpers
@@ -80,7 +89,7 @@ async function loadCookiesIfExist(context, source) {
 }
 
 // ---------------------------------------------------------------------------
-// Smart scroll engine (preserved exactly — battle-tested)
+// Smart scroll engine
 // ---------------------------------------------------------------------------
 
 function clamp(value, min, max) {
@@ -293,9 +302,13 @@ async function performSmartScroll(page, scrollTarget, distance) {
     }, { target: scrollTarget });
 
     if (afterWheel && afterWheel.top !== beforeState.top) {
-      return { moved: true, reason: 'moved', beforeTop: beforeState.top, afterTop: afterWheel.top,
-               beforeHeight: beforeState.height, afterHeight: afterWheel.height,
-               remaining: targetRemaining, step, targetKind: beforeState.isDocument ? 'document' : 'element', inputKind: 'wheel' };
+      return {
+        moved: true, reason: 'moved',
+        beforeTop: beforeState.top, afterTop: afterWheel.top,
+        beforeHeight: beforeState.height, afterHeight: afterWheel.height,
+        remaining: targetRemaining, step,
+        targetKind: beforeState.isDocument ? 'document' : 'element', inputKind: 'wheel',
+      };
     }
 
     // Wheel did not move — fall back to DOM scrollBy
@@ -307,10 +320,10 @@ async function performSmartScroll(page, scrollTarget, distance) {
       };
       const element = resolveTarget();
       if (!element) return { moved: false, reason: 'missing-target' };
-      const isDocument    = element === scrollingElement;
-      const beforeTop     = isDocument ? window.scrollY || scrollingElement.scrollTop || 0 : element.scrollTop;
-      const beforeHeight  = isDocument ? scrollingElement.scrollHeight : element.scrollHeight;
-      const beforeViewport= isDocument ? (window.innerHeight || document.documentElement.clientHeight || 0) : element.clientHeight;
+      const isDocument     = element === scrollingElement;
+      const beforeTop      = isDocument ? window.scrollY || scrollingElement.scrollTop || 0 : element.scrollTop;
+      const beforeHeight   = isDocument ? scrollingElement.scrollHeight : element.scrollHeight;
+      const beforeViewport = isDocument ? (window.innerHeight || document.documentElement.clientHeight || 0) : element.clientHeight;
       const beforeRemaining = Math.max(0, beforeHeight - beforeViewport - beforeTop);
       if (beforeRemaining <= 0) return { moved: false, reason: 'at-end', beforeTop, afterTop: beforeTop, beforeHeight, afterHeight: beforeHeight, remaining: beforeRemaining };
       const step = Math.max(1, Math.min(distance, beforeRemaining));
@@ -318,9 +331,11 @@ async function performSmartScroll(page, scrollTarget, distance) {
       else { element.scrollBy({ top: step, behavior: 'instant' }); element.dispatchEvent(new Event('scroll', { bubbles: true })); }
       const afterTop    = isDocument ? window.scrollY || scrollingElement.scrollTop || 0 : element.scrollTop;
       const afterHeight = isDocument ? scrollingElement.scrollHeight : element.scrollHeight;
-      return { moved: afterTop !== beforeTop, reason: afterTop !== beforeTop ? 'moved' : 'stalled',
-               beforeTop, afterTop, beforeHeight, afterHeight, remaining: beforeRemaining, step,
-               targetKind: isDocument ? 'document' : 'element', inputKind: 'dom-scroll' };
+      return {
+        moved: afterTop !== beforeTop, reason: afterTop !== beforeTop ? 'moved' : 'stalled',
+        beforeTop, afterTop, beforeHeight, afterHeight, remaining: beforeRemaining, step,
+        targetKind: isDocument ? 'document' : 'element', inputKind: 'dom-scroll',
+      };
     }, { target: scrollTarget, distance: step });
 
     return fallbackResult;
@@ -345,8 +360,13 @@ async function waitForScrollProgress(page, snapshot, scrollTarget, timeoutMs) {
         }
         return currentHeight !== documentHeight || currentTop !== documentTop;
       },
-      { documentHeight: snapshot?.documentHeight || 0, documentTop: snapshot?.documentTop || 0,
-        targetMarker, targetTop: scrollTarget?.scrollTop ?? 0, targetHeight: scrollTarget?.scrollHeight ?? 0 },
+      {
+        documentHeight: snapshot?.documentHeight || 0,
+        documentTop:    snapshot?.documentTop    || 0,
+        targetMarker,
+        targetTop:    scrollTarget?.scrollTop   ?? 0,
+        targetHeight: scrollTarget?.scrollHeight ?? 0,
+      },
       { timeout, polling: 100 }
     );
     return true;
@@ -365,23 +385,22 @@ async function waitForNetworkSettling(page, timeoutMs = 3000) {
 }
 
 // ---------------------------------------------------------------------------
-// DB sync — pure REST, batch upsert, price_history, protected user fields
+// DB sync
 // ---------------------------------------------------------------------------
 
-const DB_FETCH_CHUNK_SIZE  = Number.parseInt(process.env.DB_FETCH_CHUNK_SIZE || '120', 10);
+const DB_FETCH_CHUNK_SIZE  = Number.parseInt(process.env.DB_FETCH_CHUNK_SIZE  || '120', 10);
 const DB_UPSERT_CHUNK_SIZE = Number.parseInt(process.env.DB_UPSERT_CHUNK_SIZE || '100', 10);
-const DB_REQUEST_RETRIES   = Number.parseInt(process.env.DB_REQUEST_RETRIES || '2', 10);
+const DB_REQUEST_RETRIES   = Number.parseInt(process.env.DB_REQUEST_RETRIES   || '2',   10);
 
 function chunkArray(items, chunkSize) {
   const size = Math.max(1, Number.isFinite(chunkSize) ? chunkSize : 1);
-  const out = [];
+  const out  = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }
 
 async function withRetry(fn, retries, label) {
   const maxRetries = Math.max(0, Number.isFinite(retries) ? retries : 0);
-
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
@@ -393,18 +412,6 @@ async function withRetry(fn, retries, label) {
   }
 }
 
-/**
- * Sync a batch of listings to Supabase.
- * 1. Fetch all existing rows for the given IDs in one GET request.
- * 2. Detect price changes and insert into price_history.
- * 3. Run normalizeListing + mergeForUpsert on every listing.
- * 4. Batch-upsert all payloads in a single POST.
- *
- * @param {object}   db           - REST client from createSupabaseClient()
- * @param {object[]} listings     - Raw listings from extractListings()
- * @param {string}   sourceLabel  - e.g. '[MARKETPLACE]' for log prefix
- * @returns {Promise<{ newCount: number, updatedCount: number }>}
- */
 async function syncListings(db, listings, sourceLabel) {
   if (!listings.length) {
     console.log(`${sourceLabel} No listings to sync.`);
@@ -413,19 +420,17 @@ async function syncListings(db, listings, sourceLabel) {
 
   console.log(`\n[DB]${sourceLabel} Syncing ${listings.length} listings...`);
 
-  // 1. Fetch existing rows in chunks to avoid oversized in-filter URLs.
-  const ids = listings.map((l) => l.id);
+  const ids      = listings.map((l) => l.id);
   const idChunks = chunkArray(ids, DB_FETCH_CHUNK_SIZE);
   const existingRows = [];
 
   for (let i = 0; i < idChunks.length; i++) {
-    const idChunk   = idChunks[i];
-    const inFilter  = `in.(${idChunk.join(',')})`;
-    const params    = new URLSearchParams({
+    const inFilter = `in.(${idChunks[i].join(',')})`;
+    const params   = new URLSearchParams({
       select: 'id,price,currency,status,personal_status,snooze_until,note,first_seen',
       id:     inFilter,
     });
-    const url       = `${process.env.SUPABASE_URL.replace(/\/$/, '')}/rest/v1/listings?${params}`;
+    const url = `${process.env.SUPABASE_URL.replace(/\/$/, '')}/rest/v1/listings?${params}`;
 
     const rows = await withRetry(async () => {
       const res = await fetch(url, {
@@ -434,24 +439,19 @@ async function syncListings(db, listings, sourceLabel) {
           Authorization: `Bearer ${process.env.SUPABASE_ANON_KEY}`,
         },
       });
-
       if (!res.ok) {
         const body = await res.text().catch(() => '');
         throw new Error(`[DB] Batch fetch failed (${res.status}): ${body}`);
       }
-
       return res.json();
     }, DB_REQUEST_RETRIES, `${sourceLabel} existing-rows chunk ${i + 1}/${idChunks.length}`);
 
     existingRows.push(...rows);
   }
 
-  const existingMap  = new Map(existingRows.map((r) => [r.id, r]));
-
-  // 2. Price-history inserts (collected, then batch-inserted)
+  const existingMap      = new Map(existingRows.map((r) => [r.id, r]));
   const priceHistoryRows = [];
 
-  // 3. Build final payloads
   const payloads = listings.map((raw) => {
     const normalized = normalizeListing(raw);
     const existing   = existingMap.get(normalized.id) || null;
@@ -469,18 +469,15 @@ async function syncListings(db, listings, sourceLabel) {
     return payload;
   });
 
-  // 4. Batch upsert listings in chunks for large runs.
   const payloadChunks = chunkArray(payloads, DB_UPSERT_CHUNK_SIZE);
   for (let i = 0; i < payloadChunks.length; i++) {
-    const chunk = payloadChunks[i];
     await withRetry(
-      () => db.upsert('listings', chunk),
+      () => db.upsert('listings', payloadChunks[i]),
       DB_REQUEST_RETRIES,
       `${sourceLabel} upsert chunk ${i + 1}/${payloadChunks.length}`
     );
   }
 
-  // 5. Batch insert price_history (best-effort)
   if (priceHistoryRows.length) {
     try {
       await db.insert('price_history', priceHistoryRows);
@@ -498,18 +495,21 @@ async function syncListings(db, listings, sourceLabel) {
 }
 
 // ---------------------------------------------------------------------------
-// Single-source scrape
+// Single-source scrape — returns enriched stats for Discord alert
 // ---------------------------------------------------------------------------
 
 async function scrapeSource({ source, browser, db, options, sourceLabel }) {
-  const allListings      = new Map();
+  const allListings       = new Map();
   const orderedListingIds = [];
+
+  // Per-URL result objects accumulated for the Discord report
+  const urlResults = [];
 
   const targets = source.getTargets({ urls: options.urls || [], env: process.env });
 
   if (!targets.length) {
     console.log(`⚠️  ${sourceLabel} No target URLs configured`);
-    return { newCount: 0, updatedCount: 0, skipped: true };
+    return { newCount: 0, updatedCount: 0, skipped: true, skipReason: 'no-targets', urlResults };
   }
 
   console.log(`\n${'─'.repeat(60)}`);
@@ -521,7 +521,7 @@ async function scrapeSource({ source, browser, db, options, sourceLabel }) {
     const authLoaded = await loadCookiesIfExist(context, source);
 
     if (source.loginRequired && !authLoaded) {
-      return { newCount: 0, updatedCount: 0, skipped: true };
+      return { newCount: 0, updatedCount: 0, skipped: true, skipReason: 'no-cookies', urlResults };
     }
 
     const page = await context.newPage();
@@ -532,6 +532,17 @@ async function scrapeSource({ source, browser, db, options, sourceLabel }) {
       const cleanUrl = source.normalizeTargetUrl(targetUrl);
       console.log(`\n🛰️  ${sourceLabel} Scraping: ${cleanUrl}`);
 
+      // Per-URL stat object — mutated throughout the scrape loop
+      const urlStat = {
+        url:           cleanUrl,
+        listingCount:  0,
+        scrollAttempts: 0,
+        scrollFallback: false,   // true if engine switched to document mid-run
+        sessionExpired: false,
+        error:         null,
+        warnings:      [],
+      };
+
       try {
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: BROWSER_NAVIGATION_TIMEOUT });
         await page.waitForTimeout(source.initialDelayMs ?? 6000);
@@ -539,15 +550,30 @@ async function scrapeSource({ source, browser, db, options, sourceLabel }) {
         const currentUrl = page.url();
         if (source.loginRequired && (currentUrl.includes('login') || currentUrl.includes('checkpoint'))) {
           console.log(`❌ ${sourceLabel} Session expired — run: npm run login -- --source ${source.id}`);
+          urlStat.sessionExpired = true;
+          urlStat.warnings.push('Session expired — cookies need refresh');
+          urlResults.push(urlStat);
           continue;
         }
 
         console.log(`✅ ${sourceLabel} Page loaded`);
         await installScrollTelemetry(page);
 
-        let scrollState       = await inspectScrollState(page);
-        let activeScrollTarget = pickScrollTarget(scrollState, null, source.scrollTargetPreference || 'auto');
+        let scrollState        = await inspectScrollState(page);
+        let scrollPref         = source.scrollTargetPreference || 'auto';
+        let activeScrollTarget = pickScrollTarget(scrollState, null, scrollPref);
         console.log(`📜 ${sourceLabel} Scroll target: ${describeScrollTarget(activeScrollTarget)}`);
+
+        // ── DEBUG: log scroll candidates (DEBUG_SCROLL=1) ────────────────
+        if (process.env.DEBUG_SCROLL) {
+          console.log(`[DEBUG]${sourceLabel} Scroll candidates:`);
+          for (const c of scrollState.candidates) {
+            console.log(`  score=${String(c.score).padStart(5)} | ${c.tagName}${c.role ? `[role=${c.role}]` : ''} | remaining=${c.remaining} | isDoc=${c.isDocument}`);
+          }
+        }
+        // ─────────────────────────────────────────────────────────────────
+
+        const countBefore = allListings.size;
 
         const initial = await source.extractListings(page);
         for (const l of initial) {
@@ -556,17 +582,18 @@ async function scrapeSource({ source, browser, db, options, sourceLabel }) {
         }
         if (initial.length) console.log(`   ${sourceLabel} Initial snapshot: ${allListings.size} total`);
 
-        const scrollSafetyLimit = source.scrollSafetyLimit ?? 50;
-        const noProgressLimit   = source.scrollIdleRounds  ?? 4;
-        const settleTimeoutMs   = source.scrollSettleMs    ?? source.scrollDelayMs ?? 2500;
+        const scrollSafetyLimit  = source.scrollSafetyLimit ?? 50;
+        const noProgressLimit    = source.scrollIdleRounds  ?? 4;
+        const settleTimeoutMs    = source.scrollSettleMs    ?? source.scrollDelayMs ?? 2500;
 
-        let stagnantRounds = 0;
-        let attempts       = 0;
+        let stagnantRounds      = 0;
+        let movedNoGrowthRounds = 0;
+        let attempts            = 0;
 
         while (attempts < scrollSafetyLimit) {
           attempts++;
-          const beforeState = scrollState;
-          activeScrollTarget = pickScrollTarget(beforeState, activeScrollTarget, source.scrollTargetPreference || 'auto');
+          const beforeState  = scrollState;
+          activeScrollTarget = pickScrollTarget(beforeState, activeScrollTarget, scrollPref);
           const distance     = resolveScrollDistance(source, beforeState, activeScrollTarget);
           const scrollResult = await performSmartScroll(page, activeScrollTarget, distance);
           await waitForScrollProgress(page, beforeState, activeScrollTarget, settleTimeoutMs);
@@ -579,28 +606,77 @@ async function scrapeSource({ source, browser, db, options, sourceLabel }) {
             if (!allListings.has(l.id)) orderedListingIds.push(l.id);
             allListings.set(l.id, l);
           }
-          const afterTotal      = allListings.size;
-          const listingGrowth   = afterTotal - beforeTotal;
-          const documentMoved   = scrollState.documentTop !== beforeState.documentTop || scrollState.documentHeight !== beforeState.documentHeight;
-          const moved           = scrollResult.moved || documentMoved;
+          const afterTotal    = allListings.size;
+          const listingGrowth = afterTotal - beforeTotal;
+          const documentMoved = scrollState.documentTop !== beforeState.documentTop
+                             || scrollState.documentHeight !== beforeState.documentHeight;
+          const moved         = scrollResult.moved || documentMoved;
 
-          if (listingGrowth > 0 || moved) stagnantRounds = 0;
-          else stagnantRounds++;
+          if (listingGrowth > 0) {
+            stagnantRounds      = 0;
+            movedNoGrowthRounds = 0;
+          } else if (moved) {
+            movedNoGrowthRounds++;
+            stagnantRounds = 0;
+
+            if (
+              movedNoGrowthRounds >= 2 &&
+              scrollPref !== 'document' &&
+              activeScrollTarget &&
+              !activeScrollTarget.isDocument
+            ) {
+              console.log(`⚠️  ${sourceLabel} Scroll moved but no new items for ${movedNoGrowthRounds} rounds — switching to document scroll`);
+              urlStat.scrollFallback = true;
+              scrollPref             = 'document';
+              movedNoGrowthRounds    = 0;
+            }
+          } else {
+            stagnantRounds++;
+            movedNoGrowthRounds = 0;
+          }
 
           console.log(`   ${sourceLabel} Attempt ${String(attempts).padStart(2)}: ${afterTotal} total${listingGrowth > 0 ? ` (+${listingGrowth})` : ''} | ${describeScrollTarget(activeScrollTarget)} | ${scrollResult.reason}`);
 
-          if (stagnantRounds >= noProgressLimit) { console.log(`🛑 ${sourceLabel} No new content after ${stagnantRounds} stagnant rounds`); break; }
-          if (scrollResult.reason === 'at-end' && stagnantRounds >= 2) { console.log(`🛑 ${sourceLabel} Feed end reached`); break; }
-          if (!scrollState.hasScrollableTargets && stagnantRounds > 0) { console.log(`🛑 ${sourceLabel} No scrollable target`); break; }
+          if (stagnantRounds >= noProgressLimit) {
+            console.log(`🛑 ${sourceLabel} No new content after ${stagnantRounds} stagnant rounds`);
+            break;
+          }
+          if (scrollResult.reason === 'at-end' && stagnantRounds >= noProgressLimit) {
+            console.log(`🛑 ${sourceLabel} Feed end reached`);
+            break;
+          }
+          if (!scrollState.hasScrollableTargets && stagnantRounds > 0) {
+            console.log(`🛑 ${sourceLabel} No scrollable target`);
+            break;
+          }
         }
+
+        urlStat.scrollAttempts = attempts;
+        urlStat.listingCount   = allListings.size - countBefore;
+
+        // Low-listing warning
+        if (urlStat.listingCount < LOW_LISTING_THRESHOLD) {
+          const msg = `Only ${urlStat.listingCount} listing(s) found (threshold: ${LOW_LISTING_THRESHOLD})`;
+          console.log(`⚠️  ${sourceLabel} ${msg}`);
+          urlStat.warnings.push(msg);
+        }
+
+        // Scroll fallback warning (already logged above, surface in Discord too)
+        if (urlStat.scrollFallback) {
+          urlStat.warnings.push('Scroll target auto-corrected to document (possible DOM change)');
+        }
+
       } catch (err) {
         console.error(`❌ ${sourceLabel} Error on ${cleanUrl}: ${err.message}`);
+        urlStat.error = err.message;
       }
+
+      urlResults.push(urlStat);
     }
 
     const finalListings = orderedListingIds.map((id) => allListings.get(id)).filter(Boolean);
     const { newCount, updatedCount } = await syncListings(db, finalListings, sourceLabel);
-    return { newCount, updatedCount, skipped: false };
+    return { newCount, updatedCount, skipped: false, urlResults };
 
   } finally {
     await context.close();
@@ -624,10 +700,10 @@ async function runScrapePipeline({ sources, db, options = {} }) {
       const sourceLabel = `[${source.id.toUpperCase().replace(/-/g, '_')}]`;
       try {
         const result = await scrapeSource({ source, browser, db, options, sourceLabel });
-        summary.push({ id: source.id, ...result });
+        summary.push({ id: source.id, name: source.name, ...result });
       } catch (err) {
         console.error(`\n💥 ${sourceLabel} Unexpected error: ${err.message}`);
-        summary.push({ id: source.id, newCount: 0, updatedCount: 0, error: err.message });
+        summary.push({ id: source.id, name: source.name, newCount: 0, updatedCount: 0, error: err.message, urlResults: [] });
       }
     }
   } finally {
@@ -639,9 +715,9 @@ async function runScrapePipeline({ sources, db, options = {} }) {
   console.log('📊 Run summary');
   console.log('─'.repeat(60));
   for (const row of summary) {
-    if (row.error)   console.log(`  ${row.id.padEnd(25)} ❌ ${row.error}`);
-    else if (row.skipped) console.log(`  ${row.id.padEnd(25)} ⏭️  skipped`);
-    else             console.log(`  ${row.id.padEnd(25)} ✅ ${row.newCount} new, ${row.updatedCount} updated`);
+    if (row.error)        console.log(`  ${row.id.padEnd(25)} ❌ ${row.error}`);
+    else if (row.skipped) console.log(`  ${row.id.padEnd(25)} ⏭️  skipped (${row.skipReason})`);
+    else                  console.log(`  ${row.id.padEnd(25)} ✅ ${row.newCount} new, ${row.updatedCount} updated`);
   }
   console.log('═'.repeat(60));
 

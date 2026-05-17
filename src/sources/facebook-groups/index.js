@@ -142,13 +142,17 @@ module.exports = {
   cookieSourceId: 'facebook',
   loginRequired:  true,
 
-  // Scroll config — explicitly set, no spread
+  // Facebook's feed scrolls on window/document — forcing 'document' mode
+  // avoids the engine latching onto a high-scoring inner div that moves
+  // independently of the actual post feed.
+  scrollTargetPreference:  'document',
+
   scrollSafetyLimit:       50,
-  scrollIdleRounds:        4,
-  initialDelayMs:          6000,
+  scrollIdleRounds:        6,       // FB lazy-loads slowly, give it more rounds
+  initialDelayMs:          8000,    // extra time for FB's heavy initial render
   scrollDelayMs:           1200,
+  scrollSettleMs:          4000,    // wait longer after each scroll for XHR
   scrollDistance:          900,
-  scrollTargetPreference:  'auto',
   loginUrl:                DEFAULT_SOURCE_CONFIG.loginUrl,
 
   normalizeTargetUrl,
