@@ -15,6 +15,7 @@ const SOURCE_CONST = 'APPARTEL';
 const ID_PREFIX = 'APPARTEL_';
 const DEFAULT_TARGET_URL = 'https://appartel.ch/annonces?ville=Lausanne&prixMax=2000&lat=46.520714&lng=6.632528';
 const DEBUG_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.APPARTEL_DEBUG || ''));
+const LISTING_WAIT_TIMEOUT_MS = Number.parseInt(process.env.APPARTEL_WAIT_TIMEOUT_MS || '10000', 10);
 
 const pageDebugState = new WeakMap();
 
@@ -60,6 +61,17 @@ function installDebugHooks(page) {
 
   const state = { failedRequests: [] };
 
+  page.on('console', (message) => {
+    const type = message.type();
+    if (type === 'debug' || type === 'error' || type === 'warning') {
+      console.log(`🐛 [APPARTEL][console:${type}] ${message.text()}`);
+    }
+  });
+
+  page.on('pageerror', (error) => {
+    console.log(`🐛 [APPARTEL][pageerror] ${error.message}`);
+  });
+
   page.on('requestfailed', (request) => {
     state.failedRequests.push({
       url: request.url(),
@@ -81,14 +93,17 @@ async function logDebugSnapshot(page, reason) {
   try {
     const snapshot = await page.evaluate(() => {
       const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const main = document.querySelector('main');
       const bodyText = text(document.body?.innerText || '');
 
       return {
         title: text(document.title),
         url: location.href,
+        readyState: document.readyState,
         h1: text(document.querySelector('main h1')?.textContent),
         status: text(document.querySelector('main p')?.textContent),
         cards: document.querySelectorAll('main .group.bg-card').length,
+        mainHtml: text(main?.innerHTML || '').slice(0, 1500),
         bodyText: bodyText.slice(0, 1000),
       };
     });
@@ -96,9 +111,13 @@ async function logDebugSnapshot(page, reason) {
     console.log(`🐛 [APPARTEL][debug] ${reason}`);
     console.log(`   url: ${snapshot.url}`);
     console.log(`   title: ${snapshot.title || '(none)'}`);
+    console.log(`   readyState: ${snapshot.readyState || '(none)'}`);
     console.log(`   h1: ${snapshot.h1 || '(none)'}`);
     console.log(`   status: ${snapshot.status || '(none)'}`);
     console.log(`   cards: ${snapshot.cards}`);
+    if (snapshot.mainHtml) {
+      console.log(`   mainHtml: ${snapshot.mainHtml}`);
+    }
     if (snapshot.bodyText) {
       console.log(`   body: ${snapshot.bodyText}`);
     }
@@ -182,9 +201,9 @@ async function extractListings(page) {
   // Appartel renders listings client-side after a delayed fetch, so wait for
   // the card containers themselves rather than a visible heading.
   try {
-    await page.waitForSelector('main .group.bg-card', { timeout: 30000, state: 'attached' });
+    await page.waitForSelector('main .group.bg-card', { timeout: LISTING_WAIT_TIMEOUT_MS, state: 'attached' });
   } catch (_) {
-    await logDebugSnapshot(page, 'listing wait timed out');
+    await logDebugSnapshot(page, `listing wait timed out after ${LISTING_WAIT_TIMEOUT_MS}ms`);
     return [];
   }
 
