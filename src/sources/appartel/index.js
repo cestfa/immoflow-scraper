@@ -113,8 +113,14 @@ async function extractListings(page) {
     await page.getByRole('button', { name: 'Accepter' }).click({ timeout: 2000 });
   } catch (_) {}
 
-  // FIX: Wait for the new robust selector
-  await page.waitForSelector('main .group.bg-card h3', { timeout: 15000 });
+  // Appartel renders listings client-side after a delayed fetch, so wait for
+  // the card containers themselves rather than a visible heading.
+  try {
+    await page.waitForSelector('main .group.bg-card', { timeout: 30000, state: 'attached' });
+  } catch (_) {
+    return [];
+  }
+
   const raw = await page.evaluate(extractListingsFromDocument);
 
   return raw.map((item) => {
