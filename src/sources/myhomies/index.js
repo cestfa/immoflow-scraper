@@ -51,37 +51,31 @@ function extractListingsFromDocument() {
       textNodes.forEach((line) => {
         if (/CHF/i.test(line)) priceText = line;
         else if (/m²/i.test(line)) locationText = line;
-        else if (/disponible|available/i.test(line) || /\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4}/.test(line)) {
+        // Aggressive fallback to catch the date block no matter what
+        else if (/disponible|available/i.test(line) || /\d{1,2}[^\d\w]+\d{1,2}[^\d\w]+\d{2,4}/.test(line)) {
           dateText = line;
         }
       });
 
       let imgUrl = null;
-      let imageId = null;
       
       const imageNode = card.querySelector('[style*="background-image"]');
       if (imageNode) {
         const style = imageNode.getAttribute('style') || '';
-        const matchImg = style.match(/background-image\s*:\s*url\s*\(\s*["']?([^"'\)]*)["']?\s*\)/i);
+        const matchImg = style.match(/background-image\s*:\s*url\((.*?)\)/i);
+        
         if (matchImg && matchImg[1]) {
-          // Crucial fix: forcibly replace HTML entities so offline parsing perfectly matches live parsing
-          imgUrl = matchImg[1].replace(/&quot;/g, '').replace(/&amp;/g, '&').trim();
-          if (imgUrl.startsWith('//')) imgUrl = `https:${imgUrl}`;
-          
-          const decodedImgUrl = decodeURIComponent(imgUrl);
-          const idMatch = decodedImgUrl.match(/f(\d+x\d+)/);
-          if (idMatch) {
-            imageId = idMatch[1];
-          }
+          let rawUrl = matchImg[1].replace(/&quot;/g, '').replace(/['"]/g, '').replace(/&amp;/g, '&').trim();
+          if (rawUrl.startsWith('//')) rawUrl = `https:${rawUrl}`;
+          imgUrl = rawUrl;
         }
       }
 
-      const rawId = imageId || `${priceText}-${locationText}`;
+      const rawId = `${priceText}-${locationText}`;
       if (seen.has(rawId)) return;
       seen.add(rawId);
 
       results.push({
-        imageId,
         priceText,
         locationText,
         dateText,
@@ -99,6 +93,7 @@ async function extractListings(page) {
   const raw = await page.evaluate(extractListingsFromDocument);
 
   return raw.map((item) => {
+    // 1. Parse Area, Zip Code, and City
     let zip = null;
     let city = null;
     let area = null;
@@ -110,36 +105,42 @@ async function extractListings(page) {
       city = locMatch[3] ? locMatch[3].replace(/^,\s*/, '').trim() : null;
     }
 
+    // 2. Parse Date (Bulletproof digit-only extraction)
     let availableFrom = null;
-    const textToSearchForDate = item.dateText || item.fullText || '';
+    const textToSearch = item.dateText || item.fullText || '';
     
-    const isoMatch = textToSearchForDate.match(/(\d{4})\s*[\/\.\-]\s*(\d{1,2})\s*[\/\.\-]\s*(\d{1,2})/);
-    const euroMatch = textToSearchForDate.match(/(\d{1,2})\s*[\/\.\-]\s*(\d{1,2})\s*[\/\.\-]\s*(\d{2,4})/);
-
-    if (isoMatch) {
-      const y = parseInt(isoMatch[1], 10);
-      const m = parseInt(isoMatch[2], 10);
-      const d = parseInt(isoMatch[3], 10);
-      if (y >= 2000 && y < 2100) {
-        availableFrom = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    // Looks purely for ## (anything) ## (anything) ####
+    const dateMatch = textToSearch.match(/(\d{1,2})[^\d\w]+(\d{1,2})[^\d\w]+(\d{2,4})/);
+    if (dateMatch) {
+      let p1 = parseInt(dateMatch[1], 10);
+      let p2 = parseInt(dateMatch[2], 10);
+      let p3 = parseInt(dateMatch[3], 10);
+      
+      let y, m, d;
+      // Guarantee proper assignment of Year vs Day
+      if (p3 >= 2000 || (p3 >= 20 && p3 <= 99)) {
+        y = p3 < 100 ? p3 + 2000 : p3;
+        m = p2;
+        d = p1;
+      } else if (p1 >= 2000) {
+        y = p1;
+        m = p2;
+        d = p3;
       }
-    } else if (euroMatch) {
-      const d = parseInt(euroMatch[1], 10);
-      const m = parseInt(euroMatch[2], 10);
-      let y = parseInt(euroMatch[3], 10);
-      if (y < 100) y += 2000;
-      if (y >= 2000 && y < 2100) {
+      
+      // Safety bounds to prevent matching random street numbers
+      if (y >= 2000 && y < 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
         availableFrom = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
       }
     }
 
+    // 3. Construct clean Address
     const addressRaw = [zip, city].filter(Boolean).join(' ') || item.locationText;
 
-    const fallbackSlug = `${item.priceText}-${area || 0}-${city || 'unknown'}`
-      .replace(/\s+/g, '')
-      .replace(/[^a-zA-Z0-9]/g, '-');
-      
-    const distinctId = item.imageId ? item.imageId : fallbackSlug;
+    // 4. Create a DETERMINISTIC ID
+    const cleanPrice = item.priceText ? item.priceText.replace(/\D/g, '') : '0';
+    const cleanCity = city ? city.toLowerCase().replace(/[^a-z0-9]/g, '-') : 'unknown';
+    const distinctId = `${cleanPrice}-${area || 0}-${cleanCity}`;
 
     return {
       id: `${ID_PREFIX}${distinctId}`,
