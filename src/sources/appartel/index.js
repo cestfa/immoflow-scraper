@@ -14,6 +14,9 @@ const SOURCE_ID = 'appartel';
 const SOURCE_CONST = 'APPARTEL';
 const ID_PREFIX = 'APPARTEL_';
 const DEFAULT_TARGET_URL = 'https://appartel.ch/annonces?ville=Lausanne&prixMax=2000&lat=46.520714&lng=6.632528';
+const DEBUG_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.APPARTEL_DEBUG || ''));
+
+const pageDebugState = new WeakMap();
 
 function normalizeTargetUrl(url) {
   try {
@@ -50,6 +53,67 @@ function parseDuration(value) {
   const text = String(value || '').trim();
   if (!text || /immédiatement/i.test(text) || /par consentement/i.test(text)) return null;
   return null;
+}
+
+function installDebugHooks(page) {
+  if (!DEBUG_ENABLED || pageDebugState.has(page)) return pageDebugState.get(page) || null;
+
+  const state = { failedRequests: [] };
+
+  page.on('requestfailed', (request) => {
+    state.failedRequests.push({
+      url: request.url(),
+      method: request.method(),
+      resourceType: request.resourceType(),
+      failure: request.failure()?.errorText || 'unknown',
+    });
+  });
+
+  pageDebugState.set(page, state);
+  return state;
+}
+
+async function logDebugSnapshot(page, reason) {
+  if (!DEBUG_ENABLED) return;
+
+  const state = pageDebugState.get(page) || { failedRequests: [] };
+
+  try {
+    const snapshot = await page.evaluate(() => {
+      const text = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const bodyText = text(document.body?.innerText || '');
+
+      return {
+        title: text(document.title),
+        url: location.href,
+        h1: text(document.querySelector('main h1')?.textContent),
+        status: text(document.querySelector('main p')?.textContent),
+        cards: document.querySelectorAll('main .group.bg-card').length,
+        bodyText: bodyText.slice(0, 1000),
+      };
+    });
+
+    console.log(`🐛 [APPARTEL][debug] ${reason}`);
+    console.log(`   url: ${snapshot.url}`);
+    console.log(`   title: ${snapshot.title || '(none)'}`);
+    console.log(`   h1: ${snapshot.h1 || '(none)'}`);
+    console.log(`   status: ${snapshot.status || '(none)'}`);
+    console.log(`   cards: ${snapshot.cards}`);
+    if (snapshot.bodyText) {
+      console.log(`   body: ${snapshot.bodyText}`);
+    }
+
+    if (state.failedRequests.length) {
+      console.log('   failed requests:');
+      for (const item of state.failedRequests.slice(-10)) {
+        console.log(`     - ${item.method} ${item.resourceType} ${item.url} :: ${item.failure}`);
+      }
+    } else {
+      console.log('   failed requests: none captured');
+    }
+  } catch (err) {
+    console.log(`🐛 [APPARTEL][debug] Snapshot error: ${err.message}`);
+  }
 }
 
 function extractListingsFromDocument() {
@@ -109,6 +173,8 @@ function extractListingsFromDocument() {
 }
 
 async function extractListings(page) {
+  installDebugHooks(page);
+
   try {
     await page.getByRole('button', { name: 'Accepter' }).click({ timeout: 2000 });
   } catch (_) {}
@@ -118,6 +184,7 @@ async function extractListings(page) {
   try {
     await page.waitForSelector('main .group.bg-card', { timeout: 30000, state: 'attached' });
   } catch (_) {
+    await logDebugSnapshot(page, 'listing wait timed out');
     return [];
   }
 
