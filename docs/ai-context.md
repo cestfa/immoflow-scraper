@@ -167,6 +167,8 @@ Add new variables to `.env.example` when adding a source.
   Reliably returns: `address_raw`, `price`, `living_space_m2`, `floor`, `city`, `property_type`, `title`, `image_urls`.
 - `regie-braun` — Régie Braun Lausanne rental search results. No login required. Env: `REGIE_BRAUN_URLS`.
   Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `street`, `street_number`, `city`, `property_type`, `title`, `image_urls`.
+- `regie-duboux` — Régie Duboux rental listings (manual AJAX endpoint with card HTML payload). No login required. Env: `REGIE_DUBOUX_URLS`.
+  Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `floor`, `city`, `property_type`, `title`, `image_urls`.
 - `appartel` — Appartel Lausanne search results. No login required. Env: `APPARTEL_URLS`.
   Reliably returns: `address_raw`, `price`, `city`, `property_type`, `title`.
 - `helvetia` — Helvetia Lausanne search results backed by Flatfox APIs. No login required. Env: `HELVETIA_URLS`.
