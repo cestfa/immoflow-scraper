@@ -176,9 +176,47 @@ function toAbsoluteImageUrl(url) {
   }
 }
 
-function normalizeListingRow(row, detailTemplate) {
+function buildListingUrlPath(row, locale, detailTemplate) {
+  const candidateUrl = String(row.url || '').trim();
+
+  if (candidateUrl) {
+    try {
+      const parsed = new URL(candidateUrl, 'https://flatfox.ch');
+      const segments = parsed.pathname.split('/').filter(Boolean);
+
+      if (segments.length) {
+        segments[0] = locale;
+        return `/${segments.join('/')}/`;
+      }
+
+      return parsed.pathname.endsWith('/') ? parsed.pathname : `${parsed.pathname}/`;
+    } catch (_) {
+      const normalizedPath = candidateUrl.startsWith('/') ? candidateUrl : `/${candidateUrl}`;
+      return normalizedPath.endsWith('/') ? normalizedPath : `${normalizedPath}/`;
+    }
+  }
+
+  const slug = String(row.slug || '').trim();
   const listingPk = row.pk ?? row.id;
-  const listingUrlPath = String(detailTemplate || '/fr/listing/__pk__/').replace('__pk__', String(listingPk));
+
+  if (slug && listingPk !== null && listingPk !== undefined) {
+    return `/${locale}/flat/${slug}/${listingPk}/`;
+  }
+
+  if (detailTemplate && listingPk !== null && listingPk !== undefined) {
+    return String(detailTemplate).replace('__pk__', String(listingPk));
+  }
+
+  if (listingPk !== null && listingPk !== undefined) {
+    return `/${locale}/listing/${listingPk}/`;
+  }
+
+  return `/${locale}/listing/`;
+}
+
+function normalizeListingRow(row, detailTemplate, locale) {
+  const listingPk = row.pk ?? row.id;
+  const listingUrlPath = buildListingUrlPath(row, locale, detailTemplate);
   const coverImage = row.cover_image?.url_listing_search || row.cover_image?.url || null;
   const imageUrl = toAbsoluteImageUrl(coverImage);
   const imageUrls = imageUrl ? [imageUrl] : [];
@@ -220,6 +258,7 @@ function normalizeListingRow(row, detailTemplate) {
 
 async function extractListings(page) {
   const { targetUrl, selectionPk, detailTemplate } = await readSearchContext(page);
+  const locale = parseTargetUrl(targetUrl).locale;
   const pinUrl = buildPinApiUrl(targetUrl, selectionPk);
   const pinRows = await fetchJson(pinUrl);
   const pks = Array.isArray(pinRows)
@@ -231,7 +270,7 @@ async function extractListings(page) {
   const listingsUrl = buildPublicListingApiUrl(pks);
   const rows = await fetchJson(listingsUrl);
 
-  return (Array.isArray(rows) ? rows : []).map((row) => normalizeListingRow(row, detailTemplate));
+  return (Array.isArray(rows) ? rows : []).map((row) => normalizeListingRow(row, detailTemplate, locale));
 }
 
 module.exports = {
