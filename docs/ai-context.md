@@ -181,3 +181,5 @@ Add new variables to `.env.example` when adding a source.
   Uses Flatfox public APIs behind the search page; reliably returns `address_raw`, `price`, `rooms`, `living_space_m2`, `zip_code`, `city`, `property_type`, `title`, `image_urls`, `available_from`, `latitude`, `longitude`.
 - `properstar` — Properstar Lausanne rental search results. No login required. Env: `PROPERSTAR_URLS`.
   Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `street`, `street_number`, `city`, `property_type`, `title`, `image_urls`.
+- `acheter-louer` — Acheter-Louer Lausanne rental search results. No login required. Env: `ACHETER_LOUER_URLS`.
+  Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `street`, `street_number`, `zip_code`, `city`, `property_type`, `title`, `description`.
