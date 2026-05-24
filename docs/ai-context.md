@@ -193,3 +193,5 @@ Add new variables to `.env.example` when adding a source.
    Expected to return: `address_raw`, `price`, `rooms`, `living_space_m2`, `title`, `image_urls`.
    - `galland` — Galland 1889 selection (requires login). Env: `GALLAND_URLS`.
      Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `street`, `city`, `title`, `image_urls`.
+   - `wg-gesucht` — WG-Gesucht Lausanne search results. No login required. Env: `WG_GESUCHT_URLS`.
+     Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `street`, `city`, `title`, `image_urls`.
