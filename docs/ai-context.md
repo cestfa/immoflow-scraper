@@ -195,3 +195,5 @@ Add new variables to `.env.example` when adding a source.
      Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `street`, `city`, `title`, `image_urls`.
    - `wg-gesucht` — WG-Gesucht Lausanne search results. No login required. Env: `WG_GESUCHT_URLS`.
      Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `street`, `city`, `title`, `image_urls`.
+   - `rosset` — Rosset Lausanne rental search results. No login required. Env: `ROSSET_URLS`.
+     Reliably returns: `address_raw`, `price`, `rooms`, `living_space_m2`, `city`, `title`, `image_urls`.
