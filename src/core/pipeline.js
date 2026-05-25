@@ -557,6 +557,15 @@ async function scrapeSource({ source, browser, db, options, sourceLabel }) {
         }
 
         console.log(`✅ ${sourceLabel} Page loaded`);
+
+        if (typeof source.beforeExtract === 'function') {
+          try {
+            await source.beforeExtract(page, { sourceLabel });
+          } catch (err) {
+            console.log(`⚠️  ${sourceLabel} Pre-extract wait failed: ${err.message}`);
+          }
+        }
+
         await installScrollTelemetry(page);
 
         let scrollState        = await inspectScrollState(page);

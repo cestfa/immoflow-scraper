@@ -137,6 +137,26 @@ function absolutizeUrl(url) {
   }
 }
 
+async function beforeExtract(page, { sourceLabel } = {}) {
+  const waitTimeoutMs = 20_000;
+
+  try {
+    await page.waitForFunction(
+      () => {
+        const hasListingLinks = document.querySelectorAll('a[href*="/annonce/"]').length > 0;
+        if (hasListingLinks) return true;
+
+        const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+        return scripts.some((script) => /"@type"\s*:\s*"ItemList"/.test(String(script.textContent || '')));
+      },
+      { timeout: waitTimeoutMs },
+    );
+  } catch (_) {
+    const label = sourceLabel || `[${SOURCE_ID.toUpperCase()}]`;
+    console.log(`⚠️  ${label} Listing signals not detected within ${waitTimeoutMs}ms; continuing`);
+  }
+}
+
 async function extractListings(page) {
   const rawListings = await page.evaluate(() => {
     const listings = [];
@@ -314,6 +334,7 @@ module.exports = {
   scrollDelayMs: 1000,
   scrollDistance: 900,
   scrollTargetPreference: 'document',
+  beforeExtract,
   normalizeTargetUrl,
   getTargets,
   extractListings,
