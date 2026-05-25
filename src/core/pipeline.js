@@ -34,7 +34,7 @@ const {
 const { normalizeListing, mergeForUpsert } = require('./core');
 
 // Low-listing warning threshold — override via env SCRAPE_LOW_LISTING_THRESHOLD
-const LOW_LISTING_THRESHOLD = Number.parseInt(process.env.SCRAPE_LOW_LISTING_THRESHOLD || '5', 10);
+const LOW_LISTING_THRESHOLD = Number.parseInt(process.env.SCRAPE_LOW_LISTING_THRESHOLD || '1', 10);
 
 // ---------------------------------------------------------------------------
 // Platform helpers

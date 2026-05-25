@@ -153,6 +153,84 @@ async function extractListings(page) {
       return firstCandidate.split(/\s+/)[0] || null;
     };
 
+    const absolutizeUrl = (url) => {
+      const value = String(url || '').trim();
+      if (!value) return null;
+
+      try {
+        return new URL(value, 'https://www.properstar.ch').toString();
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const stableListingIdFromUrl = (url) => {
+      const value = String(url || '').trim();
+      if (!value) return null;
+
+      const match = value.match(/\/annonce\/(\d+)/);
+      return match ? match[1] : null;
+    };
+
+    const parseJsonLdListings = () => {
+      const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+      const parsedListings = [];
+
+      scripts.forEach((script) => {
+        const raw = String(script.textContent || '').trim();
+        if (!raw) return;
+
+        let parsed = null;
+        try {
+          parsed = Function(`return (${raw.replace(/;\s*$/, '')})`)();
+        } catch (_) {
+          return;
+        }
+
+        const candidates = Array.isArray(parsed) ? parsed : [parsed];
+
+        candidates.forEach((candidate) => {
+          const list = candidate?.mainEntity?.itemListElement;
+          if (!Array.isArray(list)) return;
+
+          list.forEach((entry) => {
+            const item = entry?.item;
+            if (!item || typeof item !== 'object') return;
+
+            const address = item?.mainEntity?.address || {};
+            const rawId = stableListingIdFromUrl(item.url) || String(entry.position || '').trim() || null;
+
+            parsedListings.push({
+              rawId,
+              url: item.url || null,
+              price_text: item?.offers?.price !== undefined && item?.offers?.price !== null
+                ? `${item.offers.price} CHF`
+                : null,
+              title_text: item.name || null,
+              location_text: [address.addressLocality, address.streetAddress].filter(Boolean).join(', ') || null,
+              highlights_text: null,
+              image_urls: Array.isArray(item.image)
+                ? item.image.map((src) => absolutizeUrl(src)).filter(Boolean)
+                : [absolutizeUrl(item.image)].filter(Boolean),
+              street: address.streetAddress || null,
+              street_number: null,
+              zip_code: address.postalCode || null,
+              city: address.addressLocality || null,
+              property_type: item.mainEntity?.['@type'] || item['@type'] || null,
+              rooms: item.mainEntity?.numberOfBedrooms ?? null,
+              living_space_m2: null,
+              available_from: item.datePosted || null,
+            });
+          });
+        });
+      });
+
+      return parsedListings;
+    };
+
+    const jsonLdListings = parseJsonLdListings();
+    if (jsonLdListings.length) return jsonLdListings;
+
     const cards = Array.from(document.querySelectorAll('article'));
 
     cards.forEach((article) => {
@@ -196,9 +274,10 @@ async function extractListings(page) {
     const highlightParts = parseHighlights(item.highlights_text);
     const locationParts = parseLocation(item.location_text || item.title_text);
     const listingTitle = item.title_text && item.title_text !== item.location_text ? item.title_text : null;
+    const rawId = item.rawId || (item.url ? String(item.url).match(/\/annonce\/(\d+)/)?.[1] : null);
 
     return {
-      id: `${ID_PREFIX}${item.rawId}`,
+      id: `${ID_PREFIX}${rawId}`,
       source: SOURCE_CONST,
       url: absolutizeUrl(item.url) || 'none',
       address_raw: [item.price_text, item.title_text, item.location_text, item.highlights_text].filter(Boolean).join(' | '),
@@ -208,20 +287,20 @@ async function extractListings(page) {
       price: item.price_text ? toIntOrNull(item.price_text) : null,
       currency: 'CHF',
       price_period: 'month',
-      rooms: highlightParts.rooms,
-      living_space_m2: highlightParts.living_space_m2,
+      rooms: item.rooms ?? highlightParts.rooms,
+      living_space_m2: item.living_space_m2 ?? highlightParts.living_space_m2,
       floor: null,
       total_floors: null,
-      street: locationParts.street,
-      street_number: locationParts.street_number,
-      zip_code: locationParts.zip_code,
-      city: locationParts.city,
+      street: item.street ?? locationParts.street,
+      street_number: item.street_number ?? locationParts.street_number,
+      zip_code: item.zip_code ?? locationParts.zip_code,
+      city: item.city ?? locationParts.city,
       country_code: 'CH',
       latitude: null,
       longitude: null,
       listing_type: 'rent',
-      property_type: highlightParts.property_type,
-      available_from: highlightParts.available_from,
+      property_type: item.property_type ?? highlightParts.property_type,
+      available_from: item.available_from ?? highlightParts.available_from,
     };
   });
 }
