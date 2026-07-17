@@ -47,6 +47,25 @@ function parsePrice(value) {
   return Number.isFinite(parsed) ? Math.round(parsed) : null;
 }
 
+function parseAvailableFrom(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+
+  const match = text.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
+  if (match) {
+    const [, day, month, year] = match;
+    return `${year}-${month}-${day}`;
+  }
+
+  const isoMatch = text.match(/^(\d{4})[-./](\d{2})[-./](\d{2})$/);
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch;
+    return `${year}-${month}-${day}`;
+  }
+
+  return null;
+}
+
 function slugFromUrl(url) {
   const value = String(url || '').trim();
   if (!value) return null;
@@ -161,7 +180,7 @@ function parseRossetListingsFromHtml(html) {
         latitude: typeof item.lat === 'number' ? item.lat : null,
         longitude: typeof item.lng === 'number' ? item.lng : null,
         property_type: item.propertyType ? String(item.propertyType).charAt(0).toUpperCase() + String(item.propertyType).slice(1) : null,
-        available_from: item.availabilityDate || null,
+        available_from: parseAvailableFrom(item.availabilityDate),
       };
     }).filter((item) => item.rawId);
   }
